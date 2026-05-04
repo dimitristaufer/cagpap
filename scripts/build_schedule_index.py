@@ -55,6 +55,24 @@ def parse_optional_int(value: str | None) -> int | None:
         return None
 
 
+def compact(value: str | None) -> str:
+    return (value or "").strip()
+
+
+def conference_key(short_name: str, year: str) -> str:
+    normalized_short_name = re.sub(r"[^a-z0-9]+", "-", short_name.lower()).strip("-")
+    normalized_year = re.sub(r"[^0-9]+", "", year)
+    if normalized_short_name and normalized_year:
+        return f"{normalized_short_name}-{normalized_year}"
+    return normalized_short_name or normalized_year or "unknown-conference"
+
+
+def conference_label(short_name: str, year: str) -> str:
+    if short_name and year:
+        return f"{short_name.upper()} {year}"
+    return short_name.upper() or year or "Unknown Conference"
+
+
 def main() -> int:
     with INPUT_CSV.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -62,13 +80,32 @@ def main() -> int:
 
     schedule_doc_freq: Counter[str] = Counter()
     packed_rows: list[dict[str, object]] = []
+    conferences_by_key: dict[str, dict[str, str]] = {}
 
     for row in rows:
         counter = Counter(tokenize(combine_schedule_text(row)))
         schedule_doc_freq.update(counter.keys())
+        short_name = compact(row.get("conference_short_name")).upper()
+        year = compact(row.get("conference_year"))
+        conf_key = conference_key(short_name, year)
+        conferences_by_key.setdefault(
+            conf_key,
+            {
+                "key": conf_key,
+                "id": compact(row.get("conference_id")),
+                "short_name": short_name,
+                "year": year,
+                "label": conference_label(short_name, year),
+            },
+        )
 
         packed_rows.append(
             {
+                "conference_key": conf_key,
+                "conference_id": compact(row.get("conference_id")),
+                "conference_short_name": short_name,
+                "conference_year": year,
+                "conference_label": conference_label(short_name, year),
                 "title": row.get("title", ""),
                 "authors": row.get("authors", ""),
                 "abstract": row.get("abstract", ""),
@@ -83,8 +120,13 @@ def main() -> int:
         )
 
     payload = {
-        "version": 2,
+        "version": 3,
         "row_count": len(packed_rows),
+        "conferences": sorted(
+            conferences_by_key.values(),
+            key=lambda item: (item.get("year", ""), item.get("short_name", "")),
+            reverse=True,
+        ),
         "rows": packed_rows,
         "schedule_doc_freq": dict(schedule_doc_freq),
     }

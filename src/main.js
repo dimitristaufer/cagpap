@@ -11,9 +11,10 @@ const EXTRACTION_CONCURRENCY = 2;
 const DEFAULT_VISIBLE_RESULTS = 20;
 const LOAD_MORE_STEP = 20;
 const KEYWORD_DEBOUNCE_MS = 350;
-const CALENDAR_DOWNLOADS_STORAGE_KEY = 'chi_tinerary_downloaded_calendar_items_v1';
+const APP_NAME = 'CONFA';
+const CALENDAR_DOWNLOADS_STORAGE_KEY = 'confa_downloaded_calendar_items_v1';
 const MATCHING_MODES = new Set(['tfidf', 'semantic', 'hybrid']);
-const ICS_PROD_ID = '-//CHI-tinerary//EN';
+const ICS_PROD_ID = '-//CONFA//EN';
 const FALLBACK_EVENT_DURATION_MS = 30 * 60 * 1000;
 const CONFERENCE_TIMEZONE = 'Europe/Madrid';
 const SCHEDULE_WALL_CLOCK_TIMEZONE = 'UTC';
@@ -40,6 +41,8 @@ const timeFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 const form = document.getElementById('analyze-form');
+const conferenceSelect = document.getElementById('conference-select');
+const searchAllConferencesToggle = document.getElementById('search-all-conferences');
 const fileInput = document.getElementById('pdfs');
 const fileSelection = document.getElementById('file-selection');
 const clearPdfsBtn = document.getElementById('clear-pdfs-btn');
@@ -78,7 +81,11 @@ const scoreWorker = new Worker(new URL('./score-worker.js', import.meta.url), { 
 let requestSeq = 0;
 const pendingRequests = new Map();
 
+let scheduleIndexPayload = null;
 let scheduleRowCount = 0;
+let selectedConferenceKey = '';
+let searchAcrossAllConferences = false;
+let availableConferences = [];
 let extractedContext = null;
 let latestRows = [];
 let visibleResults = DEFAULT_VISIBLE_RESULTS;
@@ -106,7 +113,8 @@ scoreWorker.onmessage = (event) => {
   const payload = event.data || {};
 
   if (payload.type === 'ready') {
-    setStatus(`Schedule index ready (${payload.rowCount.toLocaleString()} rows).`);
+    const count = updateActiveScheduleRowCount();
+    setStatus(`Schedule index ready for ${scoringScopeLabel()} (${count.toLocaleString()} rows).`);
     return;
   }
 
@@ -120,7 +128,7 @@ scoreWorker.onmessage = (event) => {
       if (!semanticFallbackNotedRequests.has(payload.requestId)) {
         semanticFallbackNotedRequests.add(payload.requestId);
         const detail = payload.reason ? ` (${payload.reason})` : '';
-        appendStatusItem(`Precomputed CHI semantic embeddings were unavailable; using local fallback${detail}`);
+        appendStatusItem(`Precomputed semantic embeddings were unavailable; using local fallback${detail}`);
       }
     }
 
@@ -253,6 +261,155 @@ async function loadScheduleIndex() {
     throw new Error(`Could not load schedule index (${resp.status}).`);
   }
   return resp.json();
+}
+
+function normalizeConferenceKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase();
+}
+
+function conferenceKeyFromParts(shortName, year) {
+  const normalizedShortName = String(shortName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const normalizedYear = String(year || '').replace(/[^0-9]+/g, '');
+  if (normalizedShortName && normalizedYear) return `${normalizedShortName}-${normalizedYear}`;
+  return normalizedShortName || normalizedYear || 'unknown-conference';
+}
+
+function conferenceLabelFromParts(shortName, year) {
+  const short = compactWhitespace(shortName).toUpperCase();
+  const normalizedYear = compactWhitespace(year);
+  if (short && normalizedYear) return `${short} ${normalizedYear}`;
+  return short || normalizedYear || 'Unknown Conference';
+}
+
+function normalizeConferenceRecord(record = {}) {
+  const shortName = compactWhitespace(record.short_name || record.conference_short_name).toUpperCase();
+  const year = compactWhitespace(record.year || record.conference_year);
+  const key = normalizeConferenceKey(record.key || record.conference_key || conferenceKeyFromParts(shortName, year));
+  return {
+    key,
+    id: compactWhitespace(record.id || record.conference_id),
+    shortName,
+    year,
+    label: compactWhitespace(record.label || record.conference_label) || conferenceLabelFromParts(shortName, year),
+  };
+}
+
+function conferencesFromScheduleIndex(scheduleIndex) {
+  const records = Array.isArray(scheduleIndex?.conferences) ? scheduleIndex.conferences : [];
+  const byKey = new Map();
+
+  for (const record of records) {
+    const conference = normalizeConferenceRecord(record);
+    if (conference.key) {
+      byKey.set(conference.key, conference);
+    }
+  }
+
+  for (const row of Array.isArray(scheduleIndex?.rows) ? scheduleIndex.rows : []) {
+    const conference = normalizeConferenceRecord(row);
+    if (conference.key && !byKey.has(conference.key)) {
+      byKey.set(conference.key, conference);
+    }
+  }
+
+  return Array.from(byKey.values()).sort((left, right) => {
+    const yearDiff = Number(right.year || 0) - Number(left.year || 0);
+    if (yearDiff) return yearDiff;
+    return left.label.localeCompare(right.label);
+  });
+}
+
+function getSelectedConference() {
+  return availableConferences.find((conference) => conference.key === selectedConferenceKey) || availableConferences[0] || null;
+}
+
+function selectedConferenceLabel() {
+  return getSelectedConference()?.label || 'Selected Conference';
+}
+
+function scoringScopeLabel() {
+  return searchAcrossAllConferences ? 'all conferences' : selectedConferenceLabel();
+}
+
+function activeScheduleRows() {
+  const rows = Array.isArray(scheduleIndexPayload?.rows) ? scheduleIndexPayload.rows : [];
+  if (searchAcrossAllConferences) return rows;
+  const selectedKey = normalizeConferenceKey(selectedConferenceKey);
+  return rows.filter((row) => normalizeConferenceKey(row.conference_key) === selectedKey);
+}
+
+function updateActiveScheduleRowCount() {
+  scheduleRowCount = activeScheduleRows().length;
+  return scheduleRowCount;
+}
+
+function populateConferenceSelector() {
+  if (!conferenceSelect) return;
+  conferenceSelect.innerHTML = '';
+
+  const conferences = availableConferences.length
+    ? availableConferences
+    : [
+        {
+          key: 'chi-2026',
+          label: 'CHI 2026',
+        },
+      ];
+
+  for (const conference of conferences) {
+    const option = document.createElement('option');
+    option.value = conference.key;
+    option.textContent = conference.label;
+    option.selected = conference.key === selectedConferenceKey;
+    conferenceSelect.appendChild(option);
+  }
+
+  conferenceSelect.value = selectedConferenceKey || conferences[0]?.key || '';
+}
+
+function updateConferenceDocumentTitle() {
+  const label = selectedConferenceLabel();
+  document.title = label ? `${APP_NAME} | ${label}` : APP_NAME;
+}
+
+function initializeConferenceControls(scheduleIndex) {
+  scheduleIndexPayload = scheduleIndex;
+  availableConferences = conferencesFromScheduleIndex(scheduleIndexPayload);
+  selectedConferenceKey =
+    normalizeConferenceKey(conferenceSelect?.value) ||
+    availableConferences[0]?.key ||
+    normalizeConferenceKey(scheduleIndexPayload?.rows?.[0]?.conference_key);
+  searchAcrossAllConferences = Boolean(searchAllConferencesToggle?.checked);
+  populateConferenceSelector();
+  updateActiveScheduleRowCount();
+  updateConferenceDocumentTitle();
+}
+
+async function rerunForConferenceScopeChange() {
+  searchAcrossAllConferences = Boolean(searchAllConferencesToggle?.checked);
+  selectedConferenceKey = normalizeConferenceKey(conferenceSelect?.value) || selectedConferenceKey;
+  updateActiveScheduleRowCount();
+  updateConferenceDocumentTitle();
+
+  if (!extractedContext || isExtracting) {
+    clearResults();
+    setStatus(`Selected ${scoringScopeLabel()} (${scheduleRowCount.toLocaleString()} rows). Ready.`);
+    return;
+  }
+
+  try {
+    await runScoringFromExtracted(`Recomputing for ${scoringScopeLabel()}...`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setStatus(message);
+    appendStatusItem(`Error: ${message}`);
+  }
 }
 
 function validateUploads(files, { allowEmpty = false } = {}) {
@@ -1002,11 +1159,11 @@ async function extractAllPdfs(files) {
   });
 }
 
-function runWorkerScore({ worksTexts, workNames, customKeywords, matchingMode }) {
+function runWorkerScore({ worksTexts, workNames, customKeywords, matchingMode, conferenceKey, searchAcrossAllConferences }) {
   const requestId = ++requestSeq;
   const normalizedMode = normalizeMatchingMode(matchingMode);
   const timeoutMs = normalizedMode === 'tfidf' ? 120000 : 900000;
-  const topN = scheduleRowCount || 10000;
+  const topN = updateActiveScheduleRowCount() || 10000;
 
   return new Promise((resolve, reject) => {
     const timeoutHandle = window.setTimeout(() => {
@@ -1033,6 +1190,8 @@ function runWorkerScore({ worksTexts, workNames, customKeywords, matchingMode })
       workNames,
       customKeywords,
       matchingMode: normalizedMode,
+      conferenceKey,
+      searchAcrossAllConferences: Boolean(searchAcrossAllConferences),
       topN,
     });
   });
@@ -1180,20 +1339,22 @@ function buildCalendarPayload(row, rowIndex) {
   }
 
   const normalizedEndMs = endMs && endMs > startMs ? endMs : startMs + FALLBACK_EVENT_DURATION_MS;
-  const summary = String(row.title || `CHI session #${row.relevance_rank || rowIndex + 1}`);
+  const conferenceLabel = compactWhitespace(row.conference_label) || selectedConferenceLabel();
+  const summary = String(row.title || `${conferenceLabel} session #${row.relevance_rank || rowIndex + 1}`);
   const location = [row.room, row.building].filter(Boolean).join(', ');
   const descriptionParts = [];
+  if (conferenceLabel) descriptionParts.push(`Conference: ${conferenceLabel}`);
   if (row.authors) descriptionParts.push(`Authors: ${row.authors}`);
   if (row.day) descriptionParts.push(`Day: ${row.day}`);
   if (row.session_type) descriptionParts.push(`Session type: ${row.session_type}`);
   if (row.abstract) descriptionParts.push(row.abstract);
   const description = descriptionParts.join('\n\n');
 
-  const uidSlug = slugifyForFilename(`${summary}-${startMs}-${rowIndex + 1}`) || `chi-${rowIndex + 1}`;
+  const uidSlug = slugifyForFilename(`${conferenceLabel}-${summary}-${startMs}-${rowIndex + 1}`) || `conference-${rowIndex + 1}`;
   const dtStamp = formatUtcIcsDateTime(Date.now());
   const dtStart = formatFloatingIcsDateTime(startMs);
   const dtEnd = formatFloatingIcsDateTime(normalizedEndMs);
-  const calendarName = 'CHI-tinerary';
+  const calendarName = conferenceLabel ? `${conferenceLabel} ${APP_NAME}` : APP_NAME;
 
   const lines = [
     'BEGIN:VCALENDAR',
@@ -1204,7 +1365,7 @@ function buildCalendarPayload(row, rowIndex) {
     `X-WR-CALNAME:${escapeIcsText(calendarName)}`,
     `X-WR-TIMEZONE:${CONFERENCE_TIMEZONE}`,
     'BEGIN:VEVENT',
-    `UID:${uidSlug}@chi-relevance-client`,
+    `UID:${uidSlug}@confa-client`,
     `DTSTAMP:${dtStamp}`,
     `CREATED:${dtStamp}`,
     `LAST-MODIFIED:${dtStamp}`,
@@ -1226,7 +1387,7 @@ function buildCalendarPayload(row, rowIndex) {
   lines.push('END:VEVENT', 'END:VCALENDAR');
 
   const icsText = `${lines.map(foldIcsLine).join('\r\n')}\r\n`;
-  const fileBase = slugifyForFilename(summary) || `chi-session-${rowIndex + 1}`;
+  const fileBase = slugifyForFilename(`${conferenceLabel}-${summary}`) || `conference-session-${rowIndex + 1}`;
 
   return {
     icsText,
@@ -1269,6 +1430,7 @@ function normalizeCalendarKeyPart(value) {
 
 function calendarItemKey(row) {
   const payload = {
+    conference: normalizeCalendarKeyPart(row?.conference_key || row?.conference_label),
     title: normalizeCalendarKeyPart(row?.title),
     start: asEpochMs(row?.start_date_unix_ms),
     end: asEpochMs(row?.end_date_unix_ms),
@@ -1474,6 +1636,7 @@ function renderResults(rows, startIndex = 0) {
         const modeLabel = matchingModeLabel(normalizeMatchingMode(row.relevance_mode || latestMatchingMode));
         const scoreBreakdown = scoreBreakdownText(row);
         const isCalendarAdded = hasDownloadedCalendarItem(row);
+        const conferenceLabel = compactWhitespace(row.conference_label) || selectedConferenceLabel();
         return `
       <article class="result-card">
         <header>
@@ -1487,6 +1650,7 @@ function renderResults(rows, startIndex = 0) {
         <h2>${escapeHtml(row.title || 'Untitled')}</h2>
         <p class="authors">${escapeHtml(row.authors || 'No authors listed')}</p>
         <dl class="facts">
+          <div><dt>Conference</dt><dd>${escapeHtml(conferenceLabel || 'n/a')}</dd></div>
           <div><dt>Room</dt><dd>${escapeHtml(row.room || 'n/a')}</dd></div>
           <div><dt>Building</dt><dd>${escapeHtml(row.building || 'n/a')}</dd></div>
           <div><dt>Start</dt><dd>${escapeHtml(formattedStartDate)}</dd></div>
@@ -1536,6 +1700,10 @@ async function runScoringFromExtracted(statusText, skipDoneStatus = false) {
   const runId = ++scoringRunSeq;
   const customKeywords = parseCustomKeywords(keywordInput.value);
   const matchingMode = normalizeMatchingMode(matchingModeInput?.value);
+  updateActiveScheduleRowCount();
+  if (!scheduleRowCount) {
+    throw new Error(`No schedule rows found for ${scoringScopeLabel()}.`);
+  }
   if (modeNeedsSemanticModel(matchingMode) && !semanticModelAvailable) {
     throw new Error('Semantic model is not available. Click "Download semantic model" first.');
   }
@@ -1546,6 +1714,8 @@ async function runScoringFromExtracted(statusText, skipDoneStatus = false) {
     workNames: extractedContext.workNames,
     customKeywords,
     matchingMode,
+    conferenceKey: selectedConferenceKey,
+    searchAcrossAllConferences,
   });
 
   if (runId !== scoringRunSeq) {
@@ -1561,7 +1731,7 @@ async function runScoringFromExtracted(statusText, skipDoneStatus = false) {
   if (!skipDoneStatus) {
     const shown = Math.min(visibleResults, latestRows.length);
     setStatus(
-      `Done (${matchingModeLabel(latestMatchingMode)}). Showing ${shown.toLocaleString()} of ${latestRows.length.toLocaleString()} results.`
+      `Done (${matchingModeLabel(latestMatchingMode)}, ${scoringScopeLabel()}). Showing ${shown.toLocaleString()} of ${latestRows.length.toLocaleString()} results.`
     );
   }
 }
@@ -1861,6 +2031,18 @@ if (matchingModeInput) {
   });
 }
 
+if (conferenceSelect) {
+  conferenceSelect.addEventListener('change', () => {
+    void rerunForConferenceScopeChange();
+  });
+}
+
+if (searchAllConferencesToggle) {
+  searchAllConferencesToggle.addEventListener('change', () => {
+    void rerunForConferenceScopeChange();
+  });
+}
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   clearStatusItems();
@@ -1922,9 +2104,9 @@ form.addEventListener('submit', async (event) => {
   updateRunButtonAvailability();
   try {
     const scheduleIndex = await loadScheduleIndex();
-    scheduleRowCount = scheduleIndex.row_count || 0;
+    initializeConferenceControls(scheduleIndex);
     scoreWorker.postMessage({ type: 'init', scheduleIndex });
-    setStatus(`Loaded schedule index (${scheduleRowCount.toLocaleString()} rows). Ready.`);
+    setStatus(`Loaded schedule index for ${scoringScopeLabel()} (${scheduleRowCount.toLocaleString()} rows). Ready.`);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   }

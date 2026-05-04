@@ -248,7 +248,7 @@ function rowsFromTensor(output) {
 export function buildScheduleSemanticTexts(scheduleRows) {
   return scheduleRows.map((row) => {
     const text = prepareScheduleRowText(row);
-    return text || 'Untitled CHI session';
+    return text || 'Untitled conference session';
   });
 }
 

@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  base: '/CHI-tinerary/',
+  base: '/confa',
   plugins: [
     {
       name: 'dev-profile-fetch-proxy',

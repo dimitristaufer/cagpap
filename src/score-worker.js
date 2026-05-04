@@ -40,6 +40,49 @@ function normalizeMatchingMode(rawMode) {
   return VALID_MATCHING_MODES.has(normalized) ? normalized : 'tfidf';
 }
 
+function normalizeConferenceKey(rawKey) {
+  return String(rawKey || '')
+    .trim()
+    .toLowerCase();
+}
+
+function scheduleDocFreqForRows(rows) {
+  const docFreq = Object.create(null);
+  for (const row of rows) {
+    const seen = new Set();
+    for (const [term] of row?.tokens || []) {
+      if (!term || seen.has(term)) continue;
+      seen.add(term);
+      docFreq[term] = (docFreq[term] || 0) + 1;
+    }
+  }
+  return docFreq;
+}
+
+function scheduleIndexForScope({ conferenceKey, searchAcrossAllConferences = false } = {}) {
+  const allRows = Array.isArray(scheduleIndex?.rows) ? scheduleIndex.rows : [];
+  if (searchAcrossAllConferences) {
+    return {
+      ...scheduleIndex,
+      rows: allRows.map((row, idx) => ({ ...row, row_index: idx })),
+      row_count: allRows.length,
+      schedule_doc_freq: scheduleDocFreqForRows(allRows),
+    };
+  }
+
+  const normalizedConferenceKey = normalizeConferenceKey(conferenceKey);
+  const scopedRows = allRows
+    .map((row, idx) => ({ ...row, row_index: idx }))
+    .filter((row) => normalizeConferenceKey(row.conference_key) === normalizedConferenceKey);
+
+  return {
+    ...scheduleIndex,
+    rows: scopedRows,
+    row_count: scopedRows.length,
+    schedule_doc_freq: scheduleDocFreqForRows(scopedRows),
+  };
+}
+
 function postProgress(requestId, message, extra = {}) {
   self.postMessage({
     type: 'progress',
@@ -262,7 +305,7 @@ async function ensureSemanticScheduleVectors(requestId) {
     return semanticScheduleCache;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    postProgress(requestId, 'Precomputed semantic index unavailable. Building CHI semantic index locally...', {
+    postProgress(requestId, 'Precomputed semantic index unavailable. Building semantic schedule index locally...', {
       stage: 'semantic_schedule_fallback',
       reason: message,
     });
@@ -274,11 +317,11 @@ async function ensureSemanticScheduleVectors(requestId) {
     progressCallback: (info) => relayModelLoadProgress(requestId, info),
   });
   const scheduleTexts = buildScheduleSemanticTexts(scheduleIndex.rows || []);
-  postProgress(requestId, 'Building semantic vectors for CHI schedule...');
+  postProgress(requestId, 'Building semantic vectors for conference schedule...');
 
   const { vectors, model: embedModel } = await embedTexts(scheduleTexts, {
     ...SEMANTIC_OPTIONS,
-    onBatch: createBatchProgressReporter(requestId, 'Building local CHI semantic index'),
+    onBatch: createBatchProgressReporter(requestId, 'Building local semantic schedule index'),
   });
 
   semanticScheduleCache = {
@@ -353,13 +396,21 @@ self.onmessage = async (event) => {
     try {
       const started = performance.now();
       const matchingMode = normalizeMatchingMode(event.data.matchingMode);
+      const activeScheduleIndex = scheduleIndexForScope({
+        conferenceKey: event.data.conferenceKey,
+        searchAcrossAllConferences: event.data.searchAcrossAllConferences,
+      });
+
+      if (!activeScheduleIndex.rows.length) {
+        throw new Error('No schedule rows found for the selected conference scope.');
+      }
 
       const tfidfResult = scoreSchedule({
         worksTexts: event.data.worksTexts || [],
         workNames: event.data.workNames || [],
         topN: event.data.topN,
         customKeywords: event.data.customKeywords || [],
-        scheduleIndex,
+        scheduleIndex: activeScheduleIndex,
       });
 
       let result = {

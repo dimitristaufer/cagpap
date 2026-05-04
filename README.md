@@ -1,6 +1,6 @@
-# CHI Relevance Client
+# CONFA Client
 
-Browser-only CHI agenda ranking app.
+Browser-only personalized CONFerence Agenda generation app. The current bundled conference selector contains CHI 2026.
 
 ## Current State
 
@@ -17,7 +17,8 @@ Browser-only CHI agenda ranking app.
 - Semantic mode supports:
   - bundled local model files under `public/models/...`
   - in-browser model download/cache from the UI
-- Worker uses precomputed CHI semantic vectors first and falls back to local runtime embedding only if needed.
+- Conference scope can target the selected conference or search across all bundled conferences.
+- Worker uses precomputed semantic schedule vectors first and falls back to local runtime embedding only if needed.
 - Results include relevance scores, mode labeling, and `.ics` calendar export buttons.
 
 ## Run

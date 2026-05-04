@@ -3,32 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CHI-tinerary</title>
+    <title>CONFA</title>
     <meta
       name="description"
-      content="CHI-tinerary: Personalized CHI &#39;26 Agenda Generation from Your Papers."
+      content="CONFA: Personalized CONFerence Agenda generation from your papers."
     />
     <meta
       name="keywords"
-      content="CHI-tinerary, personalized conference agenda, conference agenda generation, CHI 2026, HCI conference planner"
+      content="CONFA, personalized CONFerence Agenda generation, conference agenda generation, CHI 2026, conference planner"
     />
     <meta name="author" content="Dimitri Staufer" />
     <meta name="robots" content="index, follow" />
-    <meta name="application-name" content="CHI-tinerary" />
-    <meta name="apple-mobile-web-app-title" content="CHI-tinerary" />
+    <meta name="application-name" content="CONFA" />
+    <meta name="apple-mobile-web-app-title" content="CONFA" />
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="CHI-tinerary" />
+    <meta property="og:site_name" content="CONFA" />
     <meta property="og:locale" content="en_US" />
-    <meta property="og:title" content="CHI-tinerary" />
+    <meta property="og:title" content="CONFA" />
     <meta
       property="og:description"
-      content="Personalized CHI &#39;26 Agenda Generation from Your Papers."
+      content="Personalized CONFerence Agenda generation from your papers."
     />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="CHI-tinerary" />
+    <meta name="twitter:title" content="CONFA" />
     <meta
       name="twitter:description"
-      content="Personalized CHI &#39;26 Agenda Generation from Your Papers."
+      content="Personalized CONFerence Agenda generation from your papers."
     />
     <link rel="license" href="https://creativecommons.org/licenses/by-nd/4.0/" />
   </head>
@@ -38,8 +38,21 @@
 
     <main class="page">
       <section class="hero">
-        <h1>CHI-tinerary</h1>
-        <p class="lead">CHI &#39;26 agenda generation from your papers that runs locally in your browser.</p>
+        <div class="title-switcher">
+          <h1>
+            <span class="app-title-word">CONFA</span>
+            <span class="title-for">for</span>
+            <label class="sr-only" for="conference-select">Conference</label>
+            <select id="conference-select" class="conference-title-select" name="conference">
+              <option value="chi-2026" selected>CHI 2026</option>
+            </select>
+          </h1>
+          <label class="all-conferences-toggle">
+            <input id="search-all-conferences" type="checkbox" />
+            <span>Search across all upcoming major CS conferences</span>
+          </label>
+        </div>
+        <p class="lead">Personalized CONFerence Agenda generation from your papers that runs locally in your browser.</p>
       </section>
 
       <section class="panel">

@@ -64,6 +64,11 @@ function topKeywords(workCounters, idf, topN = 15) {
     .map(([term, weight]) => ({ term, weight }));
 }
 
+function originalRowIndex(row, fallbackIndex) {
+  const parsed = Number(row?.row_index);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallbackIndex;
+}
+
 export function scoreSchedule({
   worksTexts,
   scheduleIndex,
@@ -133,6 +138,7 @@ export function scoreSchedule({
   const rows = [];
   for (const [rowIndex, row] of scheduleRows.entries()) {
     const { vec, norm } = vectorizePackedTokenPairs(row.tokens || [], idf);
+    const sourceRowIndex = originalRowIndex(row, rowIndex);
 
     const centroidSim = cosineSimilarity(vec, norm, centroid, centroidNorm);
     let maxWorkSim = 0;
@@ -145,7 +151,12 @@ export function scoreSchedule({
 
     const score = 100 * (0.7 * centroidSim + 0.3 * maxWorkSim);
     rows.push({
-      row_index: rowIndex,
+      row_index: sourceRowIndex,
+      conference_key: row.conference_key || '',
+      conference_id: row.conference_id || '',
+      conference_short_name: row.conference_short_name || '',
+      conference_year: row.conference_year || '',
+      conference_label: row.conference_label || '',
       title: row.title || '',
       authors: row.authors || '',
       abstract: row.abstract || '',
