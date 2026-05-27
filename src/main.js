@@ -2042,6 +2042,20 @@ function semanticScholarSearchUrl(row) {
   return url.toString();
 }
 
+function shouldShowPaperSearch(row) {
+  const searchableFields = [
+    row?.content_type,
+    row?.session_type,
+    row?.item_kind,
+    row?.title,
+    row?.room,
+  ];
+  const agendaText = searchableFields
+    .map((value) => String(value || '').toLowerCase())
+    .join(' ');
+  return !/(^|[^a-z])(?:workshops?|tutorials?)(?:[^a-z]|$)/.test(agendaText);
+}
+
 function renderResults(rows, startIndex = 0) {
   resultsPanel.innerHTML = rows
     .map(
@@ -2058,6 +2072,7 @@ function renderResults(rows, startIndex = 0) {
         const isPastSession = isPastEvent(row);
         const conferenceLabel = compactWhitespace(row.conference_label) || selectedConferenceLabel();
         const paperSearchUrl = semanticScholarSearchUrl(row);
+        const showPaperSearch = shouldShowPaperSearch(row);
         return `
       <article class="result-card">
         <header>
@@ -2090,14 +2105,14 @@ function renderResults(rows, startIndex = 0) {
             Add to calendar (.ics)
             ${isCalendarAdded ? '<span class="calendar-check" aria-hidden="true">✓</span>' : ''}
           </button>
-          <a
-            class="card-action-btn paper-search-btn"
-            href="${escapeHtml(paperSearchUrl)}"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Find paper
-          </a>
+          ${showPaperSearch ? `<a
+              class="card-action-btn paper-search-btn"
+              href="${escapeHtml(paperSearchUrl)}"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Find paper
+            </a>` : ''}
         </div>
       </article>
     `
