@@ -20,7 +20,7 @@ function contentTypeFor(filePath) {
   return MIME_BY_EXT.get(path.extname(filePath)) || 'application/octet-stream';
 }
 
-function distPathForRequest(reqUrl, base = '/CHI-tinerary') {
+function distPathForRequest(reqUrl, base = '/cagpap') {
   const parsed = new URL(reqUrl || '/', 'http://localhost');
   let pathname = decodeURIComponent(parsed.pathname);
   if (base && pathname === base) {
@@ -58,7 +58,7 @@ function configureBrotliPreview(server) {
 }
 
 export default defineConfig({
-  base: '/CHI-tinerary/',
+  base: '/cagpap/',
   plugins: [
     {
       name: 'brotli-preview',
