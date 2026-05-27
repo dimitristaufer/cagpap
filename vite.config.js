@@ -20,14 +20,9 @@ function contentTypeFor(filePath) {
   return MIME_BY_EXT.get(path.extname(filePath)) || 'application/octet-stream';
 }
 
-function distPathForRequest(reqUrl, base = '/cagpap') {
+function distPathForRequest(reqUrl) {
   const parsed = new URL(reqUrl || '/', 'http://localhost');
   let pathname = decodeURIComponent(parsed.pathname);
-  if (base && pathname === base) {
-    pathname = '/index.html';
-  } else if (base && pathname.startsWith(`${base}/`)) {
-    pathname = pathname.slice(base.length);
-  }
   if (pathname === '/') pathname = '/index.html';
   const normalized = pathname.replace(/^\/+/, '');
   return path.resolve(process.cwd(), 'dist', normalized);
@@ -58,7 +53,7 @@ function configureBrotliPreview(server) {
 }
 
 export default defineConfig({
-  base: '/cagpap/',
+  base: '/',
   plugins: [
     {
       name: 'brotli-preview',
