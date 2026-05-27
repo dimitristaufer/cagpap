@@ -3,56 +3,88 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CONFA</title>
+    <title>CAGPAP</title>
     <meta
       name="description"
-      content="CONFA: Personalized CONFerence Agenda generation from your papers."
+      content="CAGPAP: Conference Agenda Generator for your PAPers."
     />
     <meta
       name="keywords"
-      content="CONFA, personalized CONFerence Agenda generation, conference agenda generation, CHI 2026, conference planner"
+      content="CAGPAP, Conference Agenda Generator for your PAPers, conference agenda generation, conference planner"
     />
     <meta name="author" content="Dimitri Staufer" />
     <meta name="robots" content="index, follow" />
-    <meta name="application-name" content="CONFA" />
-    <meta name="apple-mobile-web-app-title" content="CONFA" />
+    <meta name="application-name" content="CAGPAP" />
+    <meta name="apple-mobile-web-app-title" content="CAGPAP" />
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="CONFA" />
+    <meta property="og:site_name" content="CAGPAP" />
     <meta property="og:locale" content="en_US" />
-    <meta property="og:title" content="CONFA" />
+    <meta property="og:title" content="CAGPAP" />
     <meta
       property="og:description"
-      content="Personalized CONFerence Agenda generation from your papers."
+      content="Conference Agenda Generator for your PAPers."
     />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="CONFA" />
+    <meta name="twitter:title" content="CAGPAP" />
     <meta
       name="twitter:description"
-      content="Personalized CONFerence Agenda generation from your papers."
+      content="Conference Agenda Generator for your PAPers."
     />
     <link rel="license" href="https://creativecommons.org/licenses/by-nd/4.0/" />
   </head>
   <body>
     <div class="bg-shape bg-shape-a"></div>
     <div class="bg-shape bg-shape-b"></div>
+    <div class="fixed-brand" aria-label="CAGPAP">CAGPAP</div>
 
     <main class="page">
       <section class="hero">
         <div class="title-switcher">
           <h1>
-            <span class="app-title-word">CONFA</span>
-            <span class="title-for">for</span>
-            <label class="sr-only" for="conference-select">Conference</label>
+            <span class="edition-selectors hidden" aria-label="Conference time scope">
+              <label class="selector-label" for="time-scope-select">When</label>
+              <select id="time-scope-select" class="edition-select edition-time-select" name="conference_time_scope">
+                <option value="all" selected>anytime</option>
+                <option value="upcoming">upcoming</option>
+                <option value="past">past</option>
+                <option value="upcoming-3m">&gt; 3 months</option>
+              </select>
+            </span>
+            <label class="selector-label" for="conference-select">Venue</label>
             <select id="conference-select" class="conference-title-select" name="conference">
               <option value="chi-2026" selected>CHI 2026</option>
             </select>
           </h1>
-          <label class="all-conferences-toggle">
-            <input id="search-all-conferences" type="checkbox" />
-            <span>Search across all upcoming major CS conferences</span>
-          </label>
         </div>
-        <p class="lead">Personalized CONFerence Agenda generation from your papers that runs locally in your browser.</p>
+        <p class="lead">Conference Agenda Generator for your PAPers that runs locally in your browser.</p>
+        <details class="settings-menu">
+          <summary>Settings</summary>
+          <div class="settings-menu-body">
+            <label class="all-conferences-toggle">
+              <input id="search-all-conferences" type="checkbox" />
+              <span id="search-all-conferences-label">Search across all past + upcoming conferences</span>
+            </label>
+            <label class="own-work-filter-toggle">
+              <input id="exclude-substring-matches" type="checkbox" />
+              <span>
+                Exclude items with a substring match of ≥
+                <select
+                  id="substring-match-word-count"
+                  class="inline-number-select"
+                  name="substring_match_word_count"
+                  aria-label="Substring match word count"
+                >
+                  <option value="4">4</option>
+                  <option value="5">5</option>
+                  <option value="6" selected>6</option>
+                  <option value="7">7</option>
+                  <option value="8">8</option>
+                </select>
+                words (your own work)
+              </span>
+            </label>
+          </div>
+        </details>
       </section>
 
       <section class="panel">
@@ -203,8 +235,8 @@
               <div class="matching-mode-field">
                 <label for="matching-mode">Matching Mode</label>
                 <select id="matching-mode" name="matching_mode">
-                  <option value="tfidf" selected>TF-IDF (Lexical)</option>
-                  <option value="semantic">Semantic Embeddings</option>
+                  <option value="tfidf">TF-IDF (Lexical)</option>
+                  <option value="semantic" selected>Semantic Embeddings</option>
                   <option value="hybrid">Hybrid (TF-IDF + Semantic)</option>
                 </select>
               </div>
@@ -243,6 +275,7 @@
         <a href="https://www.linkedin.com/in/dimitristaufer/" target="_blank" rel="noopener noreferrer">Dimitri Staufer</a>.
         <span class="footer-cta-line">
           <a class="footer-cta" href="mailto:staufer@tu-berlin.de">Say hi</a>
+          <a class="footer-cta" href="mailto:staufer@tu-berlin.de?subject=CAGPAP%20venue%20suggestion">Suggest venue</a>
         </span>
       </p>
     </footer>

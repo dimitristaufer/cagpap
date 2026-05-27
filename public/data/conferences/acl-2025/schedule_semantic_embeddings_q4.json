@@ -1,0 +1,24 @@
+{
+  "version": 3,
+  "sharded": true,
+  "conference_key": "acl-2025",
+  "conference_label": "ACL 2025",
+  "model_id": "onnx-community/all-MiniLM-L6-v2-ONNX",
+  "dtype": "q4",
+  "row_count": 4205,
+  "dimension": 384,
+  "format": "int8_symmetric_per_row",
+  "layout": "scales_float32le_then_int8",
+  "scale_count": 4205,
+  "quantization": {
+    "type": "symmetric_per_row_absmax",
+    "quantized_min": -127,
+    "quantized_max": 127,
+    "scale_dtype": "float32le",
+    "vector_dtype": "int8",
+    "dequantize": "value = quantized_value * row_scale; row vectors are normalized after dequantization"
+  },
+  "generated_at": "2026-05-27T14:50:41.543Z",
+  "source_schedule_version": 4,
+  "source_schedule_index_url": "data/conferences/acl-2025/schedule_index.json"
+}

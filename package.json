@@ -1,16 +1,17 @@
 {
-  "name": "confa-client",
+  "name": "cagpap-client",
   "version": "0.1.0",
   "private": true,
   "license": "CC-BY-ND-4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/compress_static_assets.mjs",
     "preview": "vite preview",
     "build:index": "python3 scripts/build_schedule_index.py",
     "build:semantic-index": "node scripts/build_schedule_semantic_embeddings.mjs",
-    "verify:parity": "node scripts/verify_parity.mjs"
+    "verify:parity": "node scripts/verify_parity.mjs",
+    "verify:semantic-int8": "node scripts/verify_semantic_int8_quality.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.0.1",

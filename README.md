@@ -1,6 +1,6 @@
-# CONFA Client
+# CAGPAP Client
 
-Browser-only personalized CONFerence Agenda generation app. The current bundled conference selector contains CHI 2026.
+Browser-only Conference Agenda Generator for your PAPers.
 
 ## Current State
 

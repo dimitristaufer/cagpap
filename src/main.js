@@ -1,7 +1,7 @@
 import './styles.css';
 import * as pdfjsLib from 'pdfjs-dist/build/pdf.mjs';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
-import { semanticModelUrl } from './shared/semantic-config.js';
+import { baseUrlPath, semanticModelUrl } from './shared/semantic-config.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -11,13 +11,45 @@ const EXTRACTION_CONCURRENCY = 2;
 const DEFAULT_VISIBLE_RESULTS = 20;
 const LOAD_MORE_STEP = 20;
 const KEYWORD_DEBOUNCE_MS = 350;
-const APP_NAME = 'CONFA';
-const CALENDAR_DOWNLOADS_STORAGE_KEY = 'confa_downloaded_calendar_items_v1';
+const APP_NAME = 'CAGPAP';
+const CALENDAR_DOWNLOADS_STORAGE_KEY = 'cagpap_downloaded_calendar_items_v1';
 const MATCHING_MODES = new Set(['tfidf', 'semantic', 'hybrid']);
-const ICS_PROD_ID = '-//CONFA//EN';
+const ICS_PROD_ID = '-//CAGPAP//EN';
 const FALLBACK_EVENT_DURATION_MS = 30 * 60 * 1000;
-const CONFERENCE_TIMEZONE = 'Europe/Madrid';
+const DEFAULT_CONFERENCE_TIMEZONE = 'Europe/Madrid';
 const SCHEDULE_WALL_CLOCK_TIMEZONE = 'UTC';
+const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
+const FIXED_TIME_SCOPE_KEY = 'all';
+const TIME_SCOPE_OPTIONS = new Map([
+  [
+    'all',
+    {
+      label: 'anytime',
+      searchLabel: 'past + upcoming conferences',
+    },
+  ],
+  [
+    'upcoming',
+    {
+      label: 'upcoming',
+      searchLabel: 'upcoming conferences',
+    },
+  ],
+  [
+    'past',
+    {
+      label: 'past',
+      searchLabel: 'past conferences',
+    },
+  ],
+  [
+    'upcoming-3m',
+    {
+      label: '> 3 months',
+      searchLabel: 'conferences more than 3 months out',
+    },
+  ],
+]);
 const DAY_PILL_CLASS_MAP = {
   monday: 'day-pill-monday',
   tuesday: 'day-pill-tuesday',
@@ -41,8 +73,12 @@ const timeFormatter = new Intl.DateTimeFormat(undefined, {
 });
 
 const form = document.getElementById('analyze-form');
+const timeScopeSelect = document.getElementById('time-scope-select');
 const conferenceSelect = document.getElementById('conference-select');
 const searchAllConferencesToggle = document.getElementById('search-all-conferences');
+const searchAllConferencesLabel = document.getElementById('search-all-conferences-label');
+const excludeSubstringMatchesInput = document.getElementById('exclude-substring-matches');
+const substringMatchWordCountSelect = document.getElementById('substring-match-word-count');
 const fileInput = document.getElementById('pdfs');
 const fileSelection = document.getElementById('file-selection');
 const clearPdfsBtn = document.getElementById('clear-pdfs-btn');
@@ -86,13 +122,17 @@ let scheduleRowCount = 0;
 let selectedConferenceKey = '';
 let searchAcrossAllConferences = false;
 let availableConferences = [];
+let conferenceSelectShowingCounts = false;
+const scheduleIndexCache = new Map();
+let selectedTimeScopeKey = FIXED_TIME_SCOPE_KEY;
+let selectedField = 'CS';
 let extractedContext = null;
 let latestRows = [];
 let visibleResults = DEFAULT_VISIBLE_RESULTS;
 let scoringRunSeq = 0;
 let keywordDebounceHandle = null;
 let isExtracting = false;
-let latestMatchingMode = 'tfidf';
+let latestMatchingMode = 'semantic';
 let fetchedProfileAbstracts = [];
 let fetchedAuthorCandidates = [];
 let selectedAuthorCandidateId = '';
@@ -113,6 +153,7 @@ scoreWorker.onmessage = (event) => {
   const payload = event.data || {};
 
   if (payload.type === 'ready') {
+    if (payload.quiet) return;
     const count = updateActiveScheduleRowCount();
     setStatus(`Schedule index ready for ${scoringScopeLabel()} (${count.toLocaleString()} rows).`);
     return;
@@ -181,6 +222,49 @@ function clearResults() {
 
 function clearStatusItems() {
   statusList.innerHTML = '';
+}
+
+function parsePixelValue(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function selectedOptionText(select) {
+  return select.options[select.selectedIndex]?.textContent || select.value || '';
+}
+
+function syncSelectContentWidth(select) {
+  if (!select) return;
+
+  const style = window.getComputedStyle(select);
+  const mirror = document.createElement('span');
+  mirror.textContent = selectedOptionText(select);
+  mirror.style.position = 'fixed';
+  mirror.style.left = '-9999px';
+  mirror.style.top = '0';
+  mirror.style.visibility = 'hidden';
+  mirror.style.whiteSpace = 'pre';
+  mirror.style.font = style.font;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.textTransform = style.textTransform;
+  document.body.appendChild(mirror);
+
+  const textWidth = mirror.getBoundingClientRect().width;
+  mirror.remove();
+
+  const width =
+    Math.ceil(textWidth) +
+    parsePixelValue(style.paddingLeft) +
+    parsePixelValue(style.paddingRight) +
+    parsePixelValue(style.borderLeftWidth) +
+    parsePixelValue(style.borderRightWidth) +
+    2;
+  select.style.width = `${Math.ceil(width)}px`;
+}
+
+function syncTitleSelectWidths() {
+  syncSelectContentWidth(timeScopeSelect);
+  syncSelectContentWidth(conferenceSelect);
 }
 
 function setActiveSourceTab(tabName, { focus = false } = {}) {
@@ -256,9 +340,9 @@ function initializeSourceTabs() {
 }
 
 async function loadScheduleIndex() {
-  const resp = await fetch('./data/schedule_index.json');
+  const resp = await fetch(baseUrlPath('data/schedule_manifest.json'));
   if (!resp.ok) {
-    throw new Error(`Could not load schedule index (${resp.status}).`);
+    throw new Error(`Could not load schedule manifest (${resp.status}).`);
   }
   return resp.json();
 }
@@ -267,6 +351,19 @@ function normalizeConferenceKey(value) {
   return String(value || '')
     .trim()
     .toLowerCase();
+}
+
+function normalizeConferenceField(value) {
+  return compactWhitespace(value || 'CS').toUpperCase();
+}
+
+function toFiniteEpochMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function selectedTimeScope() {
+  return TIME_SCOPE_OPTIONS.get(selectedTimeScopeKey) || TIME_SCOPE_OPTIONS.get('all');
 }
 
 function conferenceKeyFromParts(shortName, year) {
@@ -296,8 +393,30 @@ function normalizeConferenceRecord(record = {}) {
     id: compactWhitespace(record.id || record.conference_id),
     shortName,
     year,
+    field: normalizeConferenceField(record.field || record.conference_field || 'CS'),
+    timezone: compactWhitespace(record.timezone || record.conference_timezone) || DEFAULT_CONFERENCE_TIMEZONE,
+    rowCount: toFiniteEpochMs(record.row_count),
+    firstStartMs: toFiniteEpochMs(record.first_start_unix_ms),
+    lastEndMs: toFiniteEpochMs(record.last_end_unix_ms),
+    indexUrl: compactWhitespace(record.index_url),
+    semanticEmbeddingsMetaUrl: compactWhitespace(record.semantic_embeddings_meta_url),
+    semanticEmbeddingsBinUrl: compactWhitespace(record.semantic_embeddings_bin_url),
     label: compactWhitespace(record.label || record.conference_label) || conferenceLabelFromParts(shortName, year),
   };
+}
+
+function mergeConferenceTiming(conference, row = {}) {
+  conference.rowCount = (conference.rowCount || 0) + 1;
+  const startMs = toFiniteEpochMs(row.start_date_unix_ms);
+  const endMs = toFiniteEpochMs(row.end_date_unix_ms);
+  if (startMs != null && (conference.firstStartMs == null || startMs < conference.firstStartMs)) {
+    conference.firstStartMs = startMs;
+  }
+  if (endMs != null && (conference.lastEndMs == null || endMs > conference.lastEndMs)) {
+    conference.lastEndMs = endMs;
+  } else if (startMs != null && conference.lastEndMs == null) {
+    conference.lastEndMs = startMs;
+  }
 }
 
 function conferencesFromScheduleIndex(scheduleIndex) {
@@ -313,9 +432,12 @@ function conferencesFromScheduleIndex(scheduleIndex) {
 
   for (const row of Array.isArray(scheduleIndex?.rows) ? scheduleIndex.rows : []) {
     const conference = normalizeConferenceRecord(row);
-    if (conference.key && !byKey.has(conference.key)) {
+    if (!conference.key) continue;
+    if (!byKey.has(conference.key)) {
       byKey.set(conference.key, conference);
     }
+    const stored = byKey.get(conference.key);
+    if (stored) mergeConferenceTiming(stored, row);
   }
 
   return Array.from(byKey.values()).sort((left, right) => {
@@ -325,52 +447,276 @@ function conferencesFromScheduleIndex(scheduleIndex) {
   });
 }
 
+function conferenceMatchesTimeScope(conference, timeScopeKey = selectedTimeScopeKey) {
+  const nowMs = Date.now();
+  const startMs = conference.firstStartMs;
+  const endMs = conference.lastEndMs ?? startMs;
+
+  if (timeScopeKey === 'past') {
+    return endMs != null && endMs < nowMs;
+  }
+  if (timeScopeKey === 'upcoming') {
+    return endMs == null || endMs >= nowMs;
+  }
+  if (timeScopeKey === 'upcoming-3m') {
+    return startMs != null && startMs >= nowMs + THREE_MONTHS_MS;
+  }
+  return true;
+}
+
+function conferenceMatchesFilters(conference, { timeScopeKey = selectedTimeScopeKey, field = selectedField } = {}) {
+  return normalizeConferenceField(conference.field) === normalizeConferenceField(field) && conferenceMatchesTimeScope(conference, timeScopeKey);
+}
+
+function hasConferencesFor({ timeScopeKey = selectedTimeScopeKey, field = selectedField } = {}) {
+  return availableConferences.some((conference) => conferenceMatchesFilters(conference, { timeScopeKey, field }));
+}
+
+function editionConferences() {
+  return availableConferences.filter((conference) => conferenceMatchesFilters(conference));
+}
+
 function getSelectedConference() {
-  return availableConferences.find((conference) => conference.key === selectedConferenceKey) || availableConferences[0] || null;
+  const conferences = editionConferences();
+  return conferences.find((conference) => conference.key === selectedConferenceKey) || conferences[0] || null;
 }
 
 function selectedConferenceLabel() {
   return getSelectedConference()?.label || 'Selected Conference';
 }
 
+function selectedConferenceTimezone() {
+  return getSelectedConference()?.timezone || DEFAULT_CONFERENCE_TIMEZONE;
+}
+
 function scoringScopeLabel() {
-  return searchAcrossAllConferences ? 'all conferences' : selectedConferenceLabel();
+  return searchAcrossAllConferences ? `all ${selectedTimeScope().searchLabel}` : selectedConferenceLabel();
 }
 
 function activeScheduleRows() {
-  const rows = Array.isArray(scheduleIndexPayload?.rows) ? scheduleIndexPayload.rows : [];
-  if (searchAcrossAllConferences) return rows;
-  const selectedKey = normalizeConferenceKey(selectedConferenceKey);
-  return rows.filter((row) => normalizeConferenceKey(row.conference_key) === selectedKey);
+  if (searchAcrossAllConferences) {
+    return editionConferences().flatMap((conference) => new Array(Number(conference.rowCount || 0)).fill(conference.key));
+  }
+  const selected = getSelectedConference();
+  return selected ? new Array(Number(selected.rowCount || 0)).fill(selected.key) : [];
 }
 
 function updateActiveScheduleRowCount() {
-  scheduleRowCount = activeScheduleRows().length;
+  const conferences = searchAcrossAllConferences ? editionConferences() : [getSelectedConference()].filter(Boolean);
+  scheduleRowCount = conferences.reduce((sum, conference) => sum + Number(conference.rowCount || 0), 0);
   return scheduleRowCount;
+}
+
+function conferenceIndexUrl(conference) {
+  return conference?.indexUrl || `data/conferences/${conference?.key || 'unknown-conference'}/schedule_index.json`;
+}
+
+async function loadConferenceScheduleIndex(conference) {
+  if (!conference?.key) {
+    throw new Error('No conference selected.');
+  }
+  const indexUrl = conferenceIndexUrl(conference);
+  if (scheduleIndexCache.has(indexUrl)) {
+    return scheduleIndexCache.get(indexUrl);
+  }
+  const response = await fetch(baseUrlPath(indexUrl));
+  if (!response.ok) {
+    throw new Error(`Could not load ${conference.label || conference.key} schedule index (${response.status}).`);
+  }
+  const scheduleIndex = await response.json();
+  scheduleIndexCache.set(indexUrl, scheduleIndex);
+  return scheduleIndex;
+}
+
+function mergeScheduleDocFreq(indexes) {
+  const merged = Object.create(null);
+  for (const index of indexes) {
+    const docFreq = index?.schedule_doc_freq || {};
+    for (const [term, count] of Object.entries(docFreq)) {
+      merged[term] = (merged[term] || 0) + Number(count || 0);
+    }
+  }
+  return merged;
+}
+
+function rowsWithSequentialIndexes(indexes) {
+  const rows = [];
+  for (const index of indexes) {
+    for (const row of Array.isArray(index?.rows) ? index.rows : []) {
+      rows.push({
+        ...row,
+        row_index: rows.length,
+      });
+    }
+  }
+  return rows;
+}
+
+function semanticEmbeddingShardFor(index, conference, rowCount) {
+  const metaUrl =
+    index?.semantic_embeddings_meta_url ||
+    conference?.semanticEmbeddingsMetaUrl ||
+    `data/conferences/${conference?.key || index?.shard_key}/schedule_semantic_embeddings_q4.json`;
+  const binUrl =
+    index?.semantic_embeddings_bin_url ||
+    conference?.semanticEmbeddingsBinUrl ||
+    `data/conferences/${conference?.key || index?.shard_key}/schedule_semantic_embeddings_q4.bin`;
+  return {
+    key: conference?.key || index?.shard_key || '',
+    label: conference?.label || '',
+    row_count: rowCount,
+    meta_url: metaUrl,
+    bin_url: binUrl,
+  };
+}
+
+async function loadActiveScheduleIndex() {
+  const conferences = searchAcrossAllConferences ? editionConferences() : [getSelectedConference()].filter(Boolean);
+  if (!conferences.length) {
+    throw new Error(`No conferences found for ${scoringScopeLabel()}.`);
+  }
+
+  const indexes = await Promise.all(conferences.map((conference) => loadConferenceScheduleIndex(conference)));
+  if (indexes.length === 1) {
+    const index = indexes[0];
+    const rows = rowsWithSequentialIndexes([index]);
+    const conference = conferences[0];
+    return {
+      ...index,
+      rows,
+      row_count: rows.length,
+      schedule_doc_freq: index.schedule_doc_freq || mergeScheduleDocFreq([index]),
+      semantic_embeddings_meta_url:
+        index.semantic_embeddings_meta_url || conference.semanticEmbeddingsMetaUrl,
+      semantic_embeddings_bin_url:
+        index.semantic_embeddings_bin_url || conference.semanticEmbeddingsBinUrl,
+      semantic_embedding_shards: [semanticEmbeddingShardFor(index, conference, rows.length)],
+    };
+  }
+
+  const rows = rowsWithSequentialIndexes(indexes);
+  return {
+    version: 4,
+    sharded: true,
+    shard_key: 'active-scope',
+    row_count: rows.length,
+    conferences: conferences.map((conference) => ({
+      key: conference.key,
+      id: conference.id,
+      short_name: conference.shortName,
+      year: conference.year,
+      field: conference.field,
+      timezone: conference.timezone,
+      label: conference.label,
+      row_count: conference.rowCount,
+      first_start_unix_ms: conference.firstStartMs,
+      last_end_unix_ms: conference.lastEndMs,
+      index_url: conference.indexUrl,
+      semantic_embeddings_meta_url: conference.semanticEmbeddingsMetaUrl,
+      semantic_embeddings_bin_url: conference.semanticEmbeddingsBinUrl,
+    })),
+    rows,
+    schedule_doc_freq: mergeScheduleDocFreq(indexes),
+    semantic_embedding_shards: indexes.map((index, idx) =>
+      semanticEmbeddingShardFor(index, conferences[idx], Array.isArray(index?.rows) ? index.rows.length : 0)
+    ),
+  };
+}
+
+function conferenceOptionText(conference, includeCount = false) {
+  const label = conference?.label || 'Unknown Conference';
+  if (!includeCount) return label;
+  const rowCount = Number(conference?.rowCount || 0);
+  return `${label} (${rowCount.toLocaleString()})`;
+}
+
+function setConferenceSelectCountVisibility(showCounts) {
+  if (!conferenceSelect || conferenceSelectShowingCounts === showCounts) return;
+  conferenceSelectShowingCounts = showCounts;
+  for (const option of Array.from(conferenceSelect.options)) {
+    const label = option.dataset.label || option.textContent || '';
+    const count = Number(option.dataset.rowCount || 0);
+    option.textContent = showCounts && count > 0 ? `${label} (${count.toLocaleString()})` : label;
+  }
 }
 
 function populateConferenceSelector() {
   if (!conferenceSelect) return;
   conferenceSelect.innerHTML = '';
+  conferenceSelectShowingCounts = false;
 
-  const conferences = availableConferences.length
-    ? availableConferences
-    : [
-        {
-          key: 'chi-2026',
-          label: 'CHI 2026',
-        },
-      ];
+  const conferences = editionConferences();
+  if (!conferences.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No matching conferences';
+    conferenceSelect.appendChild(option);
+    conferenceSelect.disabled = true;
+    selectedConferenceKey = '';
+    syncSelectContentWidth(conferenceSelect);
+    return;
+  }
+
+  if (!conferences.some((conference) => conference.key === selectedConferenceKey)) {
+    selectedConferenceKey = conferences[0]?.key || '';
+  }
 
   for (const conference of conferences) {
     const option = document.createElement('option');
     option.value = conference.key;
-    option.textContent = conference.label;
+    option.dataset.label = conference.label;
+    option.dataset.rowCount = String(conference.rowCount || 0);
+    option.textContent = conferenceOptionText(conference, false);
     option.selected = conference.key === selectedConferenceKey;
     conferenceSelect.appendChild(option);
   }
 
   conferenceSelect.value = selectedConferenceKey || conferences[0]?.key || '';
+  conferenceSelect.disabled = searchAcrossAllConferences;
+  conferenceSelect.title = searchAcrossAllConferences
+    ? 'Disabled while searching across all conferences.'
+    : '';
+  syncSelectContentWidth(conferenceSelect);
+}
+
+function ensureValidConferenceFilters({ preferredTimeScopeKey = selectedTimeScopeKey } = {}) {
+  if (TIME_SCOPE_OPTIONS.has(FIXED_TIME_SCOPE_KEY) && hasConferencesFor({ timeScopeKey: FIXED_TIME_SCOPE_KEY })) {
+    selectedTimeScopeKey = FIXED_TIME_SCOPE_KEY;
+    return;
+  }
+
+  if (TIME_SCOPE_OPTIONS.has(preferredTimeScopeKey) && hasConferencesFor({ timeScopeKey: preferredTimeScopeKey })) {
+    selectedTimeScopeKey = preferredTimeScopeKey;
+    return;
+  }
+
+  for (const timeScopeKey of TIME_SCOPE_OPTIONS.keys()) {
+    if (hasConferencesFor({ timeScopeKey })) {
+      selectedTimeScopeKey = timeScopeKey;
+      return;
+    }
+  }
+}
+
+function populateTimeScopeSelector() {
+  if (!timeScopeSelect) return;
+  selectedTimeScopeKey = FIXED_TIME_SCOPE_KEY;
+  timeScopeSelect.innerHTML = '';
+  for (const [key, optionConfig] of TIME_SCOPE_OPTIONS.entries()) {
+    const option = document.createElement('option');
+    option.value = key;
+    option.textContent = optionConfig.label;
+    option.disabled = !hasConferencesFor({ timeScopeKey: key });
+    option.selected = key === selectedTimeScopeKey;
+    timeScopeSelect.appendChild(option);
+  }
+  timeScopeSelect.value = selectedTimeScopeKey;
+  syncSelectContentWidth(timeScopeSelect);
+}
+
+function updateSearchAllConferencesLabel() {
+  if (!searchAllConferencesLabel) return;
+  searchAllConferencesLabel.textContent = `Search across all ${selectedTimeScope().searchLabel}`;
 }
 
 function updateConferenceDocumentTitle() {
@@ -381,19 +727,28 @@ function updateConferenceDocumentTitle() {
 function initializeConferenceControls(scheduleIndex) {
   scheduleIndexPayload = scheduleIndex;
   availableConferences = conferencesFromScheduleIndex(scheduleIndexPayload);
+  selectedTimeScopeKey = FIXED_TIME_SCOPE_KEY;
+  ensureValidConferenceFilters();
+  populateTimeScopeSelector();
   selectedConferenceKey =
     normalizeConferenceKey(conferenceSelect?.value) ||
-    availableConferences[0]?.key ||
+    editionConferences()[0]?.key ||
     normalizeConferenceKey(scheduleIndexPayload?.rows?.[0]?.conference_key);
   searchAcrossAllConferences = Boolean(searchAllConferencesToggle?.checked);
   populateConferenceSelector();
+  updateSearchAllConferencesLabel();
   updateActiveScheduleRowCount();
   updateConferenceDocumentTitle();
 }
 
 async function rerunForConferenceScopeChange() {
+  selectedTimeScopeKey = FIXED_TIME_SCOPE_KEY;
+  ensureValidConferenceFilters();
   searchAcrossAllConferences = Boolean(searchAllConferencesToggle?.checked);
   selectedConferenceKey = normalizeConferenceKey(conferenceSelect?.value) || selectedConferenceKey;
+  populateTimeScopeSelector();
+  populateConferenceSelector();
+  updateSearchAllConferencesLabel();
   updateActiveScheduleRowCount();
   updateConferenceDocumentTitle();
 
@@ -405,6 +760,19 @@ async function rerunForConferenceScopeChange() {
 
   try {
     await runScoringFromExtracted(`Recomputing for ${scoringScopeLabel()}...`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setStatus(message);
+    appendStatusItem(`Error: ${message}`);
+  }
+}
+
+async function rerunForOwnWorkExclusionChange() {
+  selectedOwnWorkExclusion();
+  if (!extractedContext || isExtracting) return;
+
+  try {
+    await runScoringFromExtracted('Recomputing with own-work exclusion settings...');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setStatus(message);
@@ -946,10 +1314,28 @@ function parseCustomKeywords(raw) {
 }
 
 function normalizeMatchingMode(value) {
-  const mode = String(value || 'tfidf')
+  const mode = String(value || 'semantic')
     .trim()
     .toLowerCase();
-  return MATCHING_MODES.has(mode) ? mode : 'tfidf';
+  return MATCHING_MODES.has(mode) ? mode : 'semantic';
+}
+
+function normalizeSubstringMatchWordCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 6;
+  return Math.min(8, Math.max(4, Math.floor(parsed)));
+}
+
+function selectedOwnWorkExclusion() {
+  const minWords = normalizeSubstringMatchWordCount(substringMatchWordCountSelect?.value);
+  if (substringMatchWordCountSelect) {
+    substringMatchWordCountSelect.value = String(minWords);
+    substringMatchWordCountSelect.disabled = !excludeSubstringMatchesInput?.checked;
+  }
+  return {
+    enabled: Boolean(excludeSubstringMatchesInput?.checked),
+    minWords,
+  };
 }
 
 function matchingModeLabel(mode) {
@@ -1159,11 +1545,21 @@ async function extractAllPdfs(files) {
   });
 }
 
-function runWorkerScore({ worksTexts, workNames, customKeywords, matchingMode, conferenceKey, searchAcrossAllConferences }) {
+async function runWorkerScore({
+  worksTexts,
+  workNames,
+  customKeywords,
+  matchingMode,
+  conferenceKey,
+  searchAcrossAllConferences,
+  ownWorkExclusion,
+}) {
   const requestId = ++requestSeq;
   const normalizedMode = normalizeMatchingMode(matchingMode);
   const timeoutMs = normalizedMode === 'tfidf' ? 120000 : 900000;
-  const topN = updateActiveScheduleRowCount() || 10000;
+  const activeScheduleIndex = await loadActiveScheduleIndex();
+  scheduleRowCount = Number(activeScheduleIndex.row_count || activeScheduleIndex.rows?.length || 0);
+  const topN = scheduleRowCount || 10000;
 
   return new Promise((resolve, reject) => {
     const timeoutHandle = window.setTimeout(() => {
@@ -1184,6 +1580,12 @@ function runWorkerScore({ worksTexts, workNames, customKeywords, matchingMode, c
     });
 
     scoreWorker.postMessage({
+      type: 'init',
+      quiet: true,
+      scheduleIndex: activeScheduleIndex,
+    });
+
+    scoreWorker.postMessage({
       type: 'run',
       requestId,
       worksTexts,
@@ -1192,6 +1594,7 @@ function runWorkerScore({ worksTexts, workNames, customKeywords, matchingMode, c
       matchingMode: normalizedMode,
       conferenceKey,
       searchAcrossAllConferences: Boolean(searchAcrossAllConferences),
+      ownWorkExclusion,
       topN,
     });
   });
@@ -1355,6 +1758,7 @@ function buildCalendarPayload(row, rowIndex) {
   const dtStart = formatFloatingIcsDateTime(startMs);
   const dtEnd = formatFloatingIcsDateTime(normalizedEndMs);
   const calendarName = conferenceLabel ? `${conferenceLabel} ${APP_NAME}` : APP_NAME;
+  const conferenceTimezone = compactWhitespace(row.conference_timezone) || selectedConferenceTimezone();
 
   const lines = [
     'BEGIN:VCALENDAR',
@@ -1363,17 +1767,17 @@ function buildCalendarPayload(row, rowIndex) {
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
     `X-WR-CALNAME:${escapeIcsText(calendarName)}`,
-    `X-WR-TIMEZONE:${CONFERENCE_TIMEZONE}`,
+    `X-WR-TIMEZONE:${conferenceTimezone}`,
     'BEGIN:VEVENT',
-    `UID:${uidSlug}@confa-client`,
+    `UID:${uidSlug}@cagpap-client`,
     `DTSTAMP:${dtStamp}`,
     `CREATED:${dtStamp}`,
     `LAST-MODIFIED:${dtStamp}`,
     'SEQUENCE:0',
     'STATUS:CONFIRMED',
     'TRANSP:OPAQUE',
-    `DTSTART;TZID=${CONFERENCE_TIMEZONE}:${dtStart}`,
-    `DTEND;TZID=${CONFERENCE_TIMEZONE}:${dtEnd}`,
+    `DTSTART;TZID=${conferenceTimezone}:${dtStart}`,
+    `DTEND;TZID=${conferenceTimezone}:${dtEnd}`,
     `SUMMARY:${escapeIcsText(summary)}`,
   ];
 
@@ -1623,6 +2027,21 @@ function scoreBreakdownText(row) {
   return '';
 }
 
+function isPastEvent(row) {
+  const startMs = asEpochMs(row?.start_date_unix_ms);
+  const endMs = asEpochMs(row?.end_date_unix_ms);
+  const eventEndMs = endMs ?? startMs;
+  return eventEndMs != null && eventEndMs < Date.now();
+}
+
+function semanticScholarSearchUrl(row) {
+  const query = compactWhitespace(row?.title || '');
+  const url = new URL('https://www.semanticscholar.org/search');
+  url.searchParams.set('q', query || 'untitled paper');
+  url.searchParams.set('sort', 'relevance');
+  return url.toString();
+}
+
 function renderResults(rows, startIndex = 0) {
   resultsPanel.innerHTML = rows
     .map(
@@ -1636,7 +2055,9 @@ function renderResults(rows, startIndex = 0) {
         const modeLabel = matchingModeLabel(normalizeMatchingMode(row.relevance_mode || latestMatchingMode));
         const scoreBreakdown = scoreBreakdownText(row);
         const isCalendarAdded = hasDownloadedCalendarItem(row);
+        const isPastSession = isPastEvent(row);
         const conferenceLabel = compactWhitespace(row.conference_label) || selectedConferenceLabel();
+        const paperSearchUrl = semanticScholarSearchUrl(row);
         return `
       <article class="result-card">
         <header>
@@ -1661,13 +2082,22 @@ function renderResults(rows, startIndex = 0) {
         <div class="card-actions">
           <button
             type="button"
-            class="calendar-btn ${isCalendarAdded ? 'is-added' : ''}"
+            class="card-action-btn calendar-btn ${isCalendarAdded ? 'is-added' : ''} ${isPastSession ? 'is-past' : ''}"
             data-row-index="${startIndex + idx}"
             data-downloaded="${isCalendarAdded ? 'true' : 'false'}"
+            ${isPastSession ? 'disabled aria-disabled="true" title="This event is in the past."' : ''}
           >
             Add to calendar (.ics)
             ${isCalendarAdded ? '<span class="calendar-check" aria-hidden="true">✓</span>' : ''}
           </button>
+          <a
+            class="card-action-btn paper-search-btn"
+            href="${escapeHtml(paperSearchUrl)}"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Find paper
+          </a>
         </div>
       </article>
     `
@@ -1700,6 +2130,7 @@ async function runScoringFromExtracted(statusText, skipDoneStatus = false) {
   const runId = ++scoringRunSeq;
   const customKeywords = parseCustomKeywords(keywordInput.value);
   const matchingMode = normalizeMatchingMode(matchingModeInput?.value);
+  const ownWorkExclusion = selectedOwnWorkExclusion();
   updateActiveScheduleRowCount();
   if (!scheduleRowCount) {
     throw new Error(`No schedule rows found for ${scoringScopeLabel()}.`);
@@ -1716,6 +2147,7 @@ async function runScoringFromExtracted(statusText, skipDoneStatus = false) {
     matchingMode,
     conferenceKey: selectedConferenceKey,
     searchAcrossAllConferences,
+    ownWorkExclusion,
   });
 
   if (runId !== scoringRunSeq) {
@@ -1730,8 +2162,12 @@ async function runScoringFromExtracted(statusText, skipDoneStatus = false) {
 
   if (!skipDoneStatus) {
     const shown = Math.min(visibleResults, latestRows.length);
+    const excludedOwnWorkCount = Number(result.excluded_own_work_count || 0);
+    const exclusionText = excludedOwnWorkCount > 0
+      ? ` Excluded ${excludedOwnWorkCount.toLocaleString()} own-work match${excludedOwnWorkCount === 1 ? '' : 'es'}.`
+      : '';
     setStatus(
-      `Done (${matchingModeLabel(latestMatchingMode)}, ${scoringScopeLabel()}). Showing ${shown.toLocaleString()} of ${latestRows.length.toLocaleString()} results.`
+      `Done (${matchingModeLabel(latestMatchingMode)}, ${scoringScopeLabel()}). Showing ${shown.toLocaleString()} of ${latestRows.length.toLocaleString()} results.${exclusionText}`
     );
   }
 }
@@ -1867,6 +2303,15 @@ if (profileAuthorCandidatesList) {
 }
 
 if (profileAuthorQueryInput) {
+  profileAuthorQueryInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!fetchProfileBtn?.disabled) {
+      fetchProfileBtn?.click();
+    }
+  });
+
   profileAuthorQueryInput.addEventListener('input', () => {
     profileFetchRunSeq += 1;
     if (fetchProfileBtn) {
@@ -2032,14 +2477,55 @@ if (matchingModeInput) {
 }
 
 if (conferenceSelect) {
+  conferenceSelect.addEventListener('pointerdown', () => {
+    setConferenceSelectCountVisibility(true);
+  });
+
+  conferenceSelect.addEventListener('keydown', (event) => {
+    if (['ArrowDown', 'ArrowUp', ' ', 'Enter'].includes(event.key)) {
+      setConferenceSelectCountVisibility(true);
+    }
+  });
+
   conferenceSelect.addEventListener('change', () => {
+    setConferenceSelectCountVisibility(false);
+    syncSelectContentWidth(conferenceSelect);
     void rerunForConferenceScopeChange();
   });
+
+  conferenceSelect.addEventListener('blur', () => {
+    setConferenceSelectCountVisibility(false);
+    syncSelectContentWidth(conferenceSelect);
+  });
+}
+
+if (timeScopeSelect) {
+  timeScopeSelect.addEventListener('change', () => {
+    timeScopeSelect.value = FIXED_TIME_SCOPE_KEY;
+    syncSelectContentWidth(timeScopeSelect);
+    void rerunForConferenceScopeChange();
+  });
+}
+
+if (document.fonts?.ready) {
+  void document.fonts.ready.then(syncTitleSelectWidths);
 }
 
 if (searchAllConferencesToggle) {
   searchAllConferencesToggle.addEventListener('change', () => {
     void rerunForConferenceScopeChange();
+  });
+}
+
+if (excludeSubstringMatchesInput) {
+  excludeSubstringMatchesInput.addEventListener('change', () => {
+    void rerunForOwnWorkExclusionChange();
+  });
+}
+
+if (substringMatchWordCountSelect) {
+  substringMatchWordCountSelect.addEventListener('change', () => {
+    void rerunForOwnWorkExclusionChange();
   });
 }
 
@@ -2099,14 +2585,14 @@ form.addEventListener('submit', async (event) => {
   renderBoostedKeywords();
   renderProfileAbstracts();
   updateFileSelectionText();
+  selectedOwnWorkExclusion();
   latestMatchingMode = normalizeMatchingMode(matchingModeInput?.value);
   await refreshModelCacheUi();
   updateRunButtonAvailability();
   try {
     const scheduleIndex = await loadScheduleIndex();
     initializeConferenceControls(scheduleIndex);
-    scoreWorker.postMessage({ type: 'init', scheduleIndex });
-    setStatus(`Loaded schedule index for ${scoringScopeLabel()} (${scheduleRowCount.toLocaleString()} rows). Ready.`);
+    setStatus(`Loaded schedule manifest for ${scoringScopeLabel()} (${scheduleRowCount.toLocaleString()} rows). Ready.`);
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error));
   }

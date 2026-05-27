@@ -1,10 +1,12 @@
 {
-  "version": 1,
+  "version": 2,
+  "sharded": true,
   "model_id": "onnx-community/all-MiniLM-L6-v2-ONNX",
   "dtype": "q4",
-  "row_count": 3229,
-  "dimension": 384,
+  "row_count": 15463,
+  "conference_count": 7,
   "format": "float32le",
-  "generated_at": "2026-05-03T16:52:14.937Z",
-  "source_schedule_version": 3
+  "generated_at": "2026-05-27T14:51:25.133Z",
+  "manifest_url": "data/schedule_manifest.json",
+  "note": "Schedule semantic embeddings are stored per conference under data/conferences/<conference-key>/."
 }

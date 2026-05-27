@@ -9,9 +9,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..', '..');
 
-const scheduleIndexPath = path.join(repoRoot, 'chi_relevance_client', 'public', 'data', 'schedule_index.json');
+const scheduleIndexPath = path.join(
+  repoRoot,
+  'chi_relevance_client',
+  'public',
+  'data',
+  'conferences',
+  'chi-2026',
+  'schedule_index.json'
+);
 const worksDir = path.join(repoRoot, 'Works');
 const baselineCsv = path.join(repoRoot, 'chi_2026_schedule_relevance_sorted.csv');
+const baselineConferenceKey = 'chi-2026';
 
 function findPdftotext() {
   const candidates = ['/opt/homebrew/bin/pdftotext', '/usr/local/bin/pdftotext', 'pdftotext'];
@@ -49,6 +58,9 @@ function main() {
   }
 
   const scheduleIndex = JSON.parse(fs.readFileSync(scheduleIndexPath, 'utf8'));
+  if (!scheduleIndex.rows.length) {
+    throw new Error(`No rows found for ${baselineConferenceKey}.`);
+  }
   const pdftotext = findPdftotext();
 
   const workFiles = fs

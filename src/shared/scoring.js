@@ -1,5 +1,7 @@
 import { counterFromText } from './text.js';
 
+const SUBSTRING_WORD_RE = /[a-z0-9]+/g;
+
 function buildIdf(docFreq, numDocs) {
   const idf = Object.create(null);
   for (const [term, freq] of Object.entries(docFreq)) {
@@ -69,12 +71,65 @@ function originalRowIndex(row, fallbackIndex) {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallbackIndex;
 }
 
+function clampOwnWorkSubstringWordCount(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 6;
+  return Math.min(8, Math.max(4, Math.floor(parsed)));
+}
+
+function wordsForSubstringMatch(text) {
+  return String(text || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .match(SUBSTRING_WORD_RE) || [];
+}
+
+function ngramKey(words, startIndex, size) {
+  return words.slice(startIndex, startIndex + size).join(' ');
+}
+
+function buildOwnWorkSubstringSet(worksTexts, minWords) {
+  const ngrams = new Set();
+  for (const text of worksTexts) {
+    const words = wordsForSubstringMatch(text);
+    if (words.length < minWords) continue;
+    for (let idx = 0; idx <= words.length - minWords; idx += 1) {
+      ngrams.add(ngramKey(words, idx, minWords));
+    }
+  }
+  return ngrams;
+}
+
+function ownWorkSubstringMatchForRow(row, ownWorkNgrams, minWords) {
+  if (!ownWorkNgrams?.size) return null;
+  const rowText = [row?.title, row?.abstract].filter(Boolean).join(' ');
+  const rowWords = wordsForSubstringMatch(rowText);
+  if (rowWords.length < minWords) return null;
+
+  for (let idx = 0; idx <= rowWords.length - minWords; idx += 1) {
+    const phrase = ngramKey(rowWords, idx, minWords);
+    if (ownWorkNgrams.has(phrase)) {
+      return phrase;
+    }
+  }
+  return null;
+}
+
+function normalizeOwnWorkExclusion(ownWorkExclusion) {
+  return {
+    enabled: Boolean(ownWorkExclusion?.enabled),
+    minWords: clampOwnWorkSubstringWordCount(ownWorkExclusion?.minWords),
+  };
+}
+
 export function scoreSchedule({
   worksTexts,
   scheduleIndex,
   topN = 20,
   workNames = [],
   customKeywords = [],
+  ownWorkExclusion = {},
 }) {
   const normalizedKeywords = Array.isArray(customKeywords)
     ? customKeywords
@@ -96,7 +151,20 @@ export function scoreSchedule({
     throw new Error('Invalid schedule index payload.');
   }
 
-  const scheduleRows = scheduleIndex.rows;
+  const exclusion = normalizeOwnWorkExclusion(ownWorkExclusion);
+  const ownWorkNgrams = exclusion.enabled && normalizedWorksTexts.length
+    ? buildOwnWorkSubstringSet(normalizedWorksTexts, exclusion.minWords)
+    : null;
+  let excludedOwnWorkCount = 0;
+  const scheduleRows = [];
+  for (const row of scheduleIndex.rows) {
+    const matchedPhrase = ownWorkSubstringMatchForRow(row, ownWorkNgrams, exclusion.minWords);
+    if (matchedPhrase) {
+      excludedOwnWorkCount += 1;
+      continue;
+    }
+    scheduleRows.push(row);
+  }
   const workCounters = effectiveWorksTexts.map((text) => counterFromText(text));
 
   if (hasWorkTexts && normalizedKeywords.length > 0) {
@@ -157,6 +225,7 @@ export function scoreSchedule({
       conference_short_name: row.conference_short_name || '',
       conference_year: row.conference_year || '',
       conference_label: row.conference_label || '',
+      conference_timezone: row.conference_timezone || '',
       title: row.title || '',
       authors: row.authors || '',
       abstract: row.abstract || '',
@@ -187,6 +256,8 @@ export function scoreSchedule({
 
   return {
     totalMatches: rows.length,
+    excluded_own_work_count: excludedOwnWorkCount,
+    excluded_own_work_min_words: exclusion.enabled ? exclusion.minWords : null,
     rows_all: rowsAll,
     rows: resultRows,
     keywords: topKeywords(workCounters, idf, 15),

@@ -22,7 +22,7 @@ function appBaseUrl() {
   return normalizedBaseUrl(candidate);
 }
 
-function baseUrlPath(pathName) {
+export function baseUrlPath(pathName) {
   const base = appBaseUrl();
   const normalized = String(pathName || '').replace(/^\/+/, '');
   return `${base}${normalized}`;
@@ -30,8 +30,6 @@ function baseUrlPath(pathName) {
 
 export const SEMANTIC_LOCAL_MODEL_PUBLIC_DIR = 'models';
 export const SEMANTIC_LOCAL_MODEL_ROOT = baseUrlPath(SEMANTIC_LOCAL_MODEL_PUBLIC_DIR).replace(/\/$/, '');
-export const SEMANTIC_SCHEDULE_EMBEDDINGS_META_URL = baseUrlPath('data/schedule_semantic_embeddings_q4.json');
-export const SEMANTIC_SCHEDULE_EMBEDDINGS_BIN_URL = baseUrlPath('data/schedule_semantic_embeddings_q4.bin');
 export const SEMANTIC_REQUIRED_FILES = Object.freeze([
   'config.json',
   'tokenizer.json',

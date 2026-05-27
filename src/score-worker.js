@@ -7,9 +7,8 @@ import {
   reduceChunkVectorsToWorkVectors,
 } from './shared/semantic.js';
 import {
+  baseUrlPath,
   SEMANTIC_LOCAL_MODEL_ROOT,
-  SEMANTIC_SCHEDULE_EMBEDDINGS_BIN_URL,
-  SEMANTIC_SCHEDULE_EMBEDDINGS_META_URL,
   SEMANTIC_MODEL_DTYPE,
   SEMANTIC_MODEL_ID,
   SEMANTIC_MODEL_SUBFOLDER,
@@ -59,27 +58,13 @@ function scheduleDocFreqForRows(rows) {
   return docFreq;
 }
 
-function scheduleIndexForScope({ conferenceKey, searchAcrossAllConferences = false } = {}) {
+function scheduleIndexForScope() {
   const allRows = Array.isArray(scheduleIndex?.rows) ? scheduleIndex.rows : [];
-  if (searchAcrossAllConferences) {
-    return {
-      ...scheduleIndex,
-      rows: allRows.map((row, idx) => ({ ...row, row_index: idx })),
-      row_count: allRows.length,
-      schedule_doc_freq: scheduleDocFreqForRows(allRows),
-    };
-  }
-
-  const normalizedConferenceKey = normalizeConferenceKey(conferenceKey);
-  const scopedRows = allRows
-    .map((row, idx) => ({ ...row, row_index: idx }))
-    .filter((row) => normalizeConferenceKey(row.conference_key) === normalizedConferenceKey);
-
   return {
     ...scheduleIndex,
-    rows: scopedRows,
-    row_count: scopedRows.length,
-    schedule_doc_freq: scheduleDocFreqForRows(scopedRows),
+    rows: allRows.map((row, idx) => ({ ...row, row_index: idx })),
+    row_count: allRows.length,
+    schedule_doc_freq: scheduleIndex?.schedule_doc_freq || scheduleDocFreqForRows(allRows),
   };
 }
 
@@ -167,6 +152,19 @@ function dotProduct(left, right) {
   return dot;
 }
 
+function normalizeVector(vec) {
+  let normSq = 0;
+  for (let idx = 0; idx < vec.length; idx += 1) {
+    normSq += vec[idx] * vec[idx];
+  }
+  const norm = Math.sqrt(normSq);
+  if (!norm) return vec;
+  for (let idx = 0; idx < vec.length; idx += 1) {
+    vec[idx] /= norm;
+  }
+  return vec;
+}
+
 function centroidFromWorkVectors(workVectors) {
   if (!workVectors.length) {
     return new Float32Array(384);
@@ -234,67 +232,176 @@ function rankRows(rows, topN) {
   return rows.slice(0, normalizeTopN(topN, rows.length));
 }
 
-async function loadPrecomputedScheduleVectors(requestId) {
-  postProgress(requestId, 'Loading precomputed semantic schedule embeddings...');
+function scheduleAssetUrl(urlPath) {
+  const raw = String(urlPath || '').trim();
+  if (!raw) return '';
+  if (/^https?:\/\//i.test(raw) || raw.startsWith('/')) return raw;
+  return baseUrlPath(raw);
+}
+
+async function fetchPrecomputedVectorShard({ requestId, metaUrl, binUrl, expectedRows, label }) {
   const [metaResp, binResp] = await Promise.all([
-    fetch(SEMANTIC_SCHEDULE_EMBEDDINGS_META_URL),
-    fetch(SEMANTIC_SCHEDULE_EMBEDDINGS_BIN_URL),
+    fetch(scheduleAssetUrl(metaUrl)),
+    fetch(scheduleAssetUrl(binUrl)),
   ]);
   if (!metaResp.ok) {
-    throw new Error(`Missing precomputed semantic metadata (${metaResp.status}).`);
+    throw new Error(`Missing precomputed semantic metadata for ${label || 'schedule shard'} (${metaResp.status}).`);
   }
   if (!binResp.ok) {
-    throw new Error(`Missing precomputed semantic vectors (${binResp.status}).`);
+    throw new Error(`Missing precomputed semantic vectors for ${label || 'schedule shard'} (${binResp.status}).`);
   }
 
   const meta = await metaResp.json();
-  const expectedRows = scheduleIndex?.rows?.length || 0;
   const rowCount = Number(meta?.row_count);
   const dimension = Number(meta?.dimension);
   if (!Number.isInteger(rowCount) || !Number.isInteger(dimension) || rowCount <= 0 || dimension <= 0) {
     throw new Error('Invalid precomputed semantic metadata.');
   }
-  if (rowCount !== expectedRows) {
-    throw new Error(`Precomputed semantic row_count mismatch (${rowCount} vs ${expectedRows}).`);
+  if (Number.isInteger(expectedRows) && rowCount !== expectedRows) {
+    throw new Error(`Precomputed semantic row_count mismatch for ${label || 'schedule shard'} (${rowCount} vs ${expectedRows}).`);
   }
 
   const arrayBuffer = await binResp.arrayBuffer();
-  if (arrayBuffer.byteLength % 4 !== 0) {
-    throw new Error('Invalid precomputed semantic vector binary format.');
-  }
-  const flat = new Float32Array(arrayBuffer);
-  if (flat.length !== rowCount * dimension) {
-    throw new Error(
-      `Precomputed semantic vector length mismatch (${flat.length} vs expected ${rowCount * dimension}).`
-    );
-  }
-
+  const format = meta?.format || 'float32le';
   const vectors = new Array(rowCount);
-  for (let idx = 0; idx < rowCount; idx += 1) {
-    const start = idx * dimension;
-    vectors[idx] = flat.subarray(start, start + dimension);
+
+  if (format === 'float32le') {
+    if (arrayBuffer.byteLength % 4 !== 0) {
+      throw new Error('Invalid precomputed semantic vector binary format.');
+    }
+    const flat = new Float32Array(arrayBuffer);
+    if (flat.length !== rowCount * dimension) {
+      throw new Error(
+        `Precomputed semantic vector length mismatch (${flat.length} vs expected ${rowCount * dimension}).`
+      );
+    }
+
+    for (let idx = 0; idx < rowCount; idx += 1) {
+      const start = idx * dimension;
+      vectors[idx] = flat.subarray(start, start + dimension);
+    }
+  } else if (format === 'int8_symmetric_per_row') {
+    const expectedScaleBytes = rowCount * 4;
+    const expectedVectorBytes = rowCount * dimension;
+    const expectedBytes = expectedScaleBytes + expectedVectorBytes;
+    if (arrayBuffer.byteLength !== expectedBytes) {
+      throw new Error(
+        `Precomputed int8 semantic vector length mismatch (${arrayBuffer.byteLength} vs expected ${expectedBytes}).`
+      );
+    }
+
+    const scales = new Float32Array(arrayBuffer, 0, rowCount);
+    const quantized = new Int8Array(arrayBuffer, expectedScaleBytes, expectedVectorBytes);
+    for (let row = 0; row < rowCount; row += 1) {
+      const scale = Number(scales[row]);
+      if (!Number.isFinite(scale) || scale <= 0) {
+        throw new Error(`Invalid int8 semantic scale for row ${row}.`);
+      }
+      const vector = new Float32Array(dimension);
+      const offset = row * dimension;
+      for (let dim = 0; dim < dimension; dim += 1) {
+        vector[dim] = quantized[offset + dim] * scale;
+      }
+      vectors[row] = normalizeVector(vector);
+    }
+  } else {
+    throw new Error(`Unsupported precomputed semantic vector format '${format}'.`);
   }
 
   return {
     vectors,
+    dimension,
     model: {
       modelId: meta.model_id || SEMANTIC_MODEL_ID,
       dtype: meta.dtype || SEMANTIC_MODEL_DTYPE,
       source: 'precomputed',
+      format,
       generated_at: meta.generated_at || null,
     },
   };
 }
 
+async function loadPrecomputedScheduleVectors(requestId) {
+  postProgress(requestId, 'Loading precomputed semantic schedule embeddings...');
+  const shards = Array.isArray(scheduleIndex?.semantic_embedding_shards) && scheduleIndex.semantic_embedding_shards.length
+    ? scheduleIndex.semantic_embedding_shards
+    : [
+        {
+          key: scheduleIndex?.shard_key || 'schedule',
+          row_count: scheduleIndex?.rows?.length || 0,
+          meta_url: scheduleIndex?.semantic_embeddings_meta_url,
+          bin_url: scheduleIndex?.semantic_embeddings_bin_url,
+        },
+      ];
+
+  const vectors = [];
+  let dimension = 0;
+  let model = null;
+
+  for (const shard of shards) {
+    if (!shard?.meta_url || !shard?.bin_url) {
+      throw new Error(`Missing precomputed semantic embedding URLs for ${shard?.key || 'schedule shard'}.`);
+    }
+    const shardResult = await fetchPrecomputedVectorShard({
+      requestId,
+      metaUrl: shard.meta_url,
+      binUrl: shard.bin_url,
+      expectedRows: Number(shard.row_count),
+      label: shard.label || shard.key,
+    });
+    if (!dimension) {
+      dimension = shardResult.dimension;
+    } else if (dimension !== shardResult.dimension) {
+      throw new Error(`Precomputed semantic dimension mismatch (${dimension} vs ${shardResult.dimension}).`);
+    }
+    for (const vector of shardResult.vectors) {
+      vectors.push(vector);
+    }
+    model = model || shardResult.model;
+  }
+
+  const expectedRows = scheduleIndex?.rows?.length || 0;
+  if (vectors.length !== expectedRows) {
+    throw new Error(`Precomputed semantic row_count mismatch (${vectors.length} vs ${expectedRows}).`);
+  }
+
+  return {
+    vectors,
+    model: model || {
+      modelId: SEMANTIC_MODEL_ID,
+      dtype: SEMANTIC_MODEL_DTYPE,
+      source: 'precomputed',
+      generated_at: null,
+    },
+  };
+}
+
+function semanticScheduleCacheKeyForIndex(index) {
+  const rowCount = index?.rows?.length || 0;
+  const shards = Array.isArray(index?.semantic_embedding_shards) ? index.semantic_embedding_shards : [];
+  if (shards.length) {
+    return `${rowCount}:${shards
+      .map((shard) => `${shard.key || ''}:${shard.row_count || 0}:${shard.meta_url || ''}:${shard.bin_url || ''}`)
+      .join('|')}`;
+  }
+  return `${rowCount}:${index?.semantic_embeddings_meta_url || ''}:${index?.semantic_embeddings_bin_url || ''}`;
+}
+
+function semanticScheduleCacheKey() {
+  return semanticScheduleCacheKeyForIndex(scheduleIndex);
+}
+
 async function ensureSemanticScheduleVectors(requestId) {
   const rowCount = scheduleIndex?.rows?.length || 0;
-  if (semanticScheduleCache && semanticScheduleCache.rowCount === rowCount) {
+  const cacheKey = semanticScheduleCacheKey();
+  if (semanticScheduleCache && semanticScheduleCache.rowCount === rowCount && semanticScheduleCache.cacheKey === cacheKey) {
     return semanticScheduleCache;
   }
 
   try {
     const precomputed = await loadPrecomputedScheduleVectors(requestId);
     semanticScheduleCache = {
+      cacheKey,
       rowCount,
       vectors: precomputed.vectors,
       model: precomputed.model,
@@ -325,6 +432,7 @@ async function ensureSemanticScheduleVectors(requestId) {
   });
 
   semanticScheduleCache = {
+    cacheKey,
     rowCount,
     vectors,
     model: embedModel || model?.model || null,
@@ -367,6 +475,8 @@ function buildCombinedRows(tfidfResult, semanticScoresByIndex, matchingMode, top
 
   return {
     totalMatches: rows.length,
+    excluded_own_work_count: Number(tfidfResult.excluded_own_work_count || 0),
+    excluded_own_work_min_words: tfidfResult.excluded_own_work_min_words ?? null,
     rows: rankRows(rows, topN),
     keywords: tfidfResult.keywords || [],
     workSummaries: tfidfResult.workSummaries || [],
@@ -377,9 +487,14 @@ self.onmessage = async (event) => {
   const { type, requestId } = event.data || {};
 
   if (type === 'init') {
-    scheduleIndex = event.data.scheduleIndex;
-    semanticScheduleCache = null;
-    self.postMessage({ type: 'ready', rowCount: scheduleIndex?.row_count || 0 });
+    const nextScheduleIndex = event.data.scheduleIndex;
+    const currentCacheKey = scheduleIndex ? semanticScheduleCacheKeyForIndex(scheduleIndex) : '';
+    const nextCacheKey = semanticScheduleCacheKeyForIndex(nextScheduleIndex);
+    scheduleIndex = nextScheduleIndex;
+    if (currentCacheKey !== nextCacheKey) {
+      semanticScheduleCache = null;
+    }
+    self.postMessage({ type: 'ready', quiet: Boolean(event.data.quiet), rowCount: scheduleIndex?.row_count || 0 });
     return;
   }
 
@@ -396,10 +511,7 @@ self.onmessage = async (event) => {
     try {
       const started = performance.now();
       const matchingMode = normalizeMatchingMode(event.data.matchingMode);
-      const activeScheduleIndex = scheduleIndexForScope({
-        conferenceKey: event.data.conferenceKey,
-        searchAcrossAllConferences: event.data.searchAcrossAllConferences,
-      });
+      const activeScheduleIndex = scheduleIndexForScope();
 
       if (!activeScheduleIndex.rows.length) {
         throw new Error('No schedule rows found for the selected conference scope.');
@@ -411,6 +523,7 @@ self.onmessage = async (event) => {
         topN: event.data.topN,
         customKeywords: event.data.customKeywords || [],
         scheduleIndex: activeScheduleIndex,
+        ownWorkExclusion: event.data.ownWorkExclusion || {},
       });
 
       let result = {
